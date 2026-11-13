@@ -59,7 +59,10 @@ struct LauncherPanelView: View {
           .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
           .padding(.horizontal, 16)
       }
-      if let review = model.review {
+      if let uninstall = model.uninstall {
+        AppUninstallView(model: model, state: uninstall)
+          .frame(height: Self.reviewHeight)
+      } else if let review = model.review {
         ScriptPageView(
           title: review.script.title,
           subtitle: (review.script.path as NSString).abbreviatingWithTildeInPath,
@@ -122,6 +125,7 @@ struct LauncherPanelView: View {
   static func isBare(_ model: LauncherModel, update: Bool) -> Bool {
     model.isShowingRecent && model.results.isEmpty && model.error == nil && model.notice == nil
       && !model.showsActions && !update && model.review == nil && model.output == nil
+      && model.uninstall == nil
   }
 
   /// 行高：高亮的位置和面板高度都按它的前缀和算
@@ -170,8 +174,8 @@ struct LauncherPanelView: View {
     -> CGFloat
   {
     if isBare(model, update: update) { return searchHeight }
-    if model.review != nil || model.output != nil {
-      return searchHeight + 0.5 + reviewHeight + barHeight
+    if model.review != nil || model.output != nil || model.uninstall != nil {
+      return searchHeight + 0.5 + reviewHeight + barHeight + (model.error != nil ? 28 : 0)
     }
     var height = searchHeight + 0.5 + barHeight
     if model.error != nil { height += 28 }
@@ -332,7 +336,9 @@ struct LauncherPanelView: View {
   /// （有新版本时只剩「更新到 x」）
   private var bar: some View {
     HStack(spacing: 12) {
-      if model.review != nil {
+      if let uninstall = model.uninstall {
+        uninstallBar(uninstall)
+      } else if model.review != nil {
         reviewBar
       } else if let output = model.output {
         outputBar(output)
@@ -348,6 +354,25 @@ struct LauncherPanelView: View {
     .padding(.horizontal, 16)
     .frame(height: Self.barHeight)
     .overlay(alignment: .top) { Hairline() }
+  }
+
+  @ViewBuilder private func uninstallBar(_ state: LauncherModel.UninstallState) -> some View {
+    Text(state.isRunning ? "正在卸载…" : "↑↓ 选择 · ⌘↩ 勾选")
+      .foregroundStyle(.secondary)
+    Spacer(minLength: 8)
+    Button(action: model.confirmUninstall) {
+      HStack(spacing: 6) {
+        Text("移到废纸篓").foregroundStyle(Style.danger)
+        KeyCap("↩", primary: true, danger: true).accessibilityHidden(true)
+      }
+    }
+    .disabled(state.isRunning)
+    Button(action: model.cancelUninstall) {
+      HStack(spacing: 6) {
+        Text(state.isRunning ? "关闭" : "返回")
+        KeyCap("Esc")
+      }
+    }
   }
 
   /// 看脚本全文时的底栏：左边写这是什么，右边「运行 ↩」「返回 Esc」

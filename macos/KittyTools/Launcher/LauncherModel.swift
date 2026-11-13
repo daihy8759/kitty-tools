@@ -38,6 +38,7 @@ import UniformTypeIdentifiers
     didSet {
       forgotten = nil  // 打字就不能再撤销移除
       review = nil
+      uninstall = nil
       if output != nil { closeOutput() }
       search()
     }
@@ -76,6 +77,26 @@ import UniformTypeIdentifiers
   }
   var actionQuery = "" { didSet { actionSelection = 0 } }
   var actionSelection = 0
+  private(set) var uninstall: UninstallState?
+
+  struct UninstallState {
+    let id = UUID()
+    let item: LauncherItem
+    var files: [URL]
+    var checked: Set<URL> = []
+    var selection = 0
+    var isRunning = false
+    let sharedBundleID: Bool
+  }
+
+  @ObservationIgnored var quitForUninstall: (URL) async -> Bool = AppUninstall.quit
+  @ObservationIgnored var uninstallFiles: (String?, [String]) -> [URL] = { bundleID, others in
+    let library = FileManager.default.homeDirectoryForCurrentUser.appending(
+      path: "Library", directoryHint: .isDirectory)
+    return AppUninstall.relatedFiles(bundleID: bundleID, otherBundleIDs: others, library: library)
+  }
+  @ObservationIgnored private var uninstallInProgress = false
+
   /// 正在看的脚本（拍板 B5：从网上下载的，第一次跑之前先给用户看一眼全文）：列表换成脚本全文，↩ 运行、Esc 回去
   private(set) var review: ScriptReview?
 
@@ -673,6 +694,7 @@ import UniformTypeIdentifiers
     let signature = AppCatalog.signature()
     scanTask = Task {
       let scanned = await AppCatalog.scanInBackground()
+      guard !Task.isCancelled else { return }
       scanTask = nil
       LauncherIcons.forget((apps + scanned).filter { $0.kind == .app }.map(\.target))
       apps = scanned
@@ -735,6 +757,7 @@ import UniformTypeIdentifiers
     error = nil
     armed = nil
     review = nil
+    uninstall = nil
     if let output {
       self.output = nil
       if output.isRunning { detach(output.script) }
@@ -2559,6 +2582,107 @@ import UniformTypeIdentifiers
     }
   }
 
+  func beginUninstall(_ item: LauncherItem) {
+    guard !uninstallInProgress, AppUninstall.canUninstall(item) else {
+      NSSound.beep()
+      return
+    }
+    let bundleID = item.appBundleID ?? Bundle(url: URL(filePath: item.target))?.bundleIdentifier
+    let others = apps.filter { $0.kind == .app && $0.id != item.id }.compactMap(\.appBundleID)
+    let shared =
+      bundleID.map { id in
+        others.contains { $0.caseInsensitiveCompare(id) == .orderedSame }
+      } ?? false
+    let files = uninstallFiles(bundleID, others)
+    showsActions = false
+    error = nil
+    uninstall = UninstallState(item: item, files: files, sharedBundleID: shared)
+  }
+
+  func cancelUninstall() {
+    uninstall = nil
+    error = nil
+  }
+
+  func selectUninstallFile(_ index: Int) {
+    guard let state = uninstall, !state.isRunning, state.files.indices.contains(index) else {
+      return
+    }
+    uninstall?.selection = index + 1
+    let url = state.files[index]
+    if state.checked.contains(url) {
+      uninstall?.checked.remove(url)
+    } else {
+      uninstall?.checked.insert(url)
+    }
+  }
+
+  func confirmUninstall() {
+    guard let state = uninstall, !state.isRunning, !uninstallInProgress,
+      AppUninstall.canUninstall(state.item)
+    else { return }
+    uninstallInProgress = true
+    uninstall?.isRunning = true
+    error = nil
+    Task {
+      defer { uninstallInProgress = false }
+      let appURL = URL(filePath: state.item.target)
+      guard await quitForUninstall(appURL) else {
+        uninstallFailed("应用未退出，请退出后重试", session: state.id)
+        return
+      }
+      var moved: [URL] = []
+      for url in state.files where state.checked.contains(url) {
+        do {
+          try await recycle(url)
+          moved.append(url)
+        } catch {
+          uninstallFailed(
+            "没能移到废纸篓：\(url.lastPathComponent)（\(error.localizedDescription)）",
+            session: state.id, moved: moved)
+          return
+        }
+      }
+      guard AppUninstall.canUninstall(state.item) else {
+        uninstallFailed("应用的位置已改变，请重新选择", session: state.id, moved: moved)
+        return
+      }
+      do {
+        try await recycle(appURL)
+      } catch {
+        uninstallFailed(
+          "没能移到废纸篓：\(error.localizedDescription)", session: state.id, moved: moved)
+        return
+      }
+      scanTask?.cancel()
+      scanTask = nil
+      apps.removeAll { $0.id == state.item.id }
+      LauncherIcons.forget([state.item.target])
+      if uninstall?.id == state.id { uninstall = nil }
+      let index = selection
+      withAnimation(Style.Motion.settle.animation(reduced: Style.reduceMotion)) {
+        if isShowingRecent {
+          search()
+        } else {
+          results.removeAll { $0.id == state.item.id }
+        }
+      }
+      selection = min(index, max(results.count - 1, 0))
+      island?.show("已移到废纸篓「\(state.item.title)」", symbol: "trash.circle.fill")
+    }
+  }
+
+  private func uninstallFailed(_ message: String, session: UUID, moved: [URL] = []) {
+    if uninstall?.id == session {
+      uninstall?.files.removeAll { moved.contains($0) }
+      uninstall?.checked.subtract(moved)
+      uninstall?.selection = 0
+      uninstall?.isRunning = false
+      error = message
+    }
+    island?.show(message, tone: .error)
+  }
+
   /// 默认浏览器以外能开网页的 App（按 https 问 LaunchServices，不读网页）。
   /// ponytail: 登记了 https 的非浏览器 App 也会列出来，真碰到再按 bundle id 滤
   static func otherBrowsers() -> [URL] {
@@ -2609,6 +2733,23 @@ import UniformTypeIdentifiers
 
   func handleCommand(_ selector: Selector) -> Bool {
     if showsActions { return handleMenuCommand(selector) }
+    if let state = uninstall {
+      switch selector {
+      case #selector(NSResponder.moveUp(_:)):
+        uninstall?.selection = max(0, state.selection - 1)
+      case #selector(NSResponder.moveDown(_:)):
+        uninstall?.selection = min(state.files.count, state.selection + 1)
+      case #selector(NSResponder.insertNewline(_:)):
+        if Style.isReturnKey, !Style.isKeyRepeat { confirmUninstall() }
+      case #selector(NSResponder.cancelOperation(_:)): cancelUninstall()
+      case #selector(NSResponder.insertTab(_:)),
+        #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+        #selector(NSResponder.insertLineBreak(_:)):
+        break
+      default: return false
+      }
+      return true
+    }
     if review != nil { return handleReviewCommand(selector) }
     if output != nil { return handleOutputCommand(selector) }
     switch selector {
@@ -2731,6 +2872,15 @@ import UniformTypeIdentifiers
     // 不看大写锁定、fn 和数字键盘标志（方向键带着后两个），和 OverlayPanel 的 ⌘W 同一套判断
     let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
     let key = Int(event.keyCode)
+    if let state = uninstall {
+      if modifiers == .command && key == kVK_Return && state.selection > 0 {
+        selectUninstallFile(state.selection - 1)
+        return true
+      }
+      let editing = [kVK_ANSI_X, kVK_ANSI_C, kVK_ANSI_V, kVK_ANSI_A, kVK_ANSI_Z]
+      return !(modifiers == .command && editing.contains(key))
+        && !(modifiers == [.command, .shift] && key == kVK_ANSI_Z)
+    }
     // 看脚本全文那一页：⌘1–9、⌘Y、⌘D 这些对着藏在后面的行的键都不做，编辑搜索框的（剪切、复制、粘贴、全选、撤销）照常
     if review != nil {
       let editing = [kVK_ANSI_X, kVK_ANSI_C, kVK_ANSI_V, kVK_ANSI_A, kVK_ANSI_Z]
@@ -3038,6 +3188,10 @@ import UniformTypeIdentifiers
     if isFile(item) {
       add("移到废纸篓", "trash", section: 4, destructive: true) { [unowned self] in
         moveToTrash(item)
+      }
+    } else if AppUninstall.canUninstall(item) {
+      add("卸载应用", "trash", section: 4, destructive: true) { [unowned self] in
+        beginUninstall(item)
       }
     }
     return actions
