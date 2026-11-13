@@ -11,7 +11,7 @@ struct StyleTests {
   @Test func dynamicColorsResolveOffMainThread() async {
     let colors = [
       Style.brand, Style.brandInk, Style.onBrand, Style.selectedFill, Style.hairline,
-      Style.inputFill,
+      Style.inputFill, Style.panelScrim,
     ]
     .map(NSColor.init)
     for color in colors {
@@ -57,7 +57,7 @@ struct StyleTests {
     }
   }
 
-  /// Panel 皮肤（Whisker §2）：15 是 .popover 毛玻璃 + maskImage 圆角，macOS 26 是 16 pt 圆角的液态玻璃；
+  /// Panel 皮肤（Whisker §2）：15 是 .popover 毛玻璃 + maskImage 圆角，macOS 26 是方形玻璃、遮色层和外层统一圆角；
   /// 两种都是内容（SwiftUI）和拖边放在同一个父视图里（拖边把滚轮转给它旁边的内容）
   @MainActor @Test func panelMaterialPerSystem() throws {
     let panel = OverlayPanel(
@@ -66,9 +66,11 @@ struct StyleTests {
     let root = try #require(panel.contentView)
     let background: NSView
     if #available(macOS 26, *) {
-      let glass = try #require(root as? NSGlassEffectView)
-      #expect(glass.cornerRadius == Style.Radius.panel)
-      background = try #require(glass.contentView)
+      #expect(type(of: root) == NSView.self)
+      let layer = try #require(root.layer)
+      #expect(layer.cornerRadius == Style.Radius.panel)
+      #expect(layer.cornerCurve == .continuous && layer.masksToBounds)
+      background = root
     } else {
       let effect = try #require(root as? NSVisualEffectView)
       #expect(effect.material == .popover && effect.state == .active && effect.maskImage != nil)
@@ -76,8 +78,26 @@ struct StyleTests {
     }
     // SwiftUI 内容（铺满）+ 左右两条拖边（毛玻璃自己也有子视图，按类型数）
     let names = background.subviews.map { String(describing: type(of: $0)) }
-    #expect(names.filter { $0.hasPrefix("NSHostingView") }.count == 1, "\(names)")
+    let hosts = background.subviews.filter {
+      String(describing: type(of: $0)).hasPrefix("NSHostingView")
+    }
+    if #available(macOS 26, *) {
+      #expect(hosts.count == 2, "\(names)")
+    } else {
+      #expect(hosts.count == 1, "\(names)")
+    }
     #expect(names.filter { $0 == "ResizeEdge" }.count == 2, "\(names)")
+    for size in [NSSize(width: 560, height: 400), NSSize(width: 360, height: 160)] {
+      panel.setFrame(NSRect(origin: NSPoint(x: -20000, y: -20000), size: size), display: false)
+      panel.layoutIfNeeded()
+      #expect(root.frame.size == size)
+      #expect(hosts.allSatisfy { $0.frame == background.bounds })
+      for x: CGFloat in [1, size.width - 1] {
+        let hit = background.hitTest(NSPoint(x: x, y: size.height / 2))
+        #expect(hit.map { String(describing: type(of: $0)) } == "ResizeEdge")
+      }
+    }
+    #expect(!panel.isVisible && !panel.isKeyWindow)
   }
 
   /// 面板描边和卡片高光不能是整块位图（常驻内存，2026-10-07）：直接拿渐变描形状，SwiftUI 会把它栅格化成形状外接矩形

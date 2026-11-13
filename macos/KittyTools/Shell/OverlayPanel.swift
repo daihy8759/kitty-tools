@@ -2,7 +2,7 @@
 // 显示只 orderFrontRegardless + makeKey，永远不调 NSApp.activate：前台 App 保持不变，
 // 粘贴时发的 ⌘V、划词时发的 ⌘C 才会落到它身上。
 // 外观是 Whisker 的 Panel 皮肤（mac-whisker §2）：无边框、16 pt 连续圆角（maskImage 裁，系统阴影跟着走）+ 描边
-// （macOS 26 起换成液态玻璃 NSGlassEffectView，不画描边）；
+// （macOS 26 起由 SwiftUI 画方形液态玻璃 + 遮色层，外层容器统一裁圆角，不画描边）；
 // 出现时淡入 + 内容下落 6 pt，用户关掉时一块替身在原位淡出（真窗口立刻收走，键盘马上回到原 App；不用系统的窗口淡出，
 // 它会泛白，见 fadeOutStandIn），高度可带动画伸缩。
 // ⌘Y 放大预览用 zoom / unzoom：从检查器卡片的位置长出来、缩回去。剪贴板、启动器、翻译浮窗可选「挤压入场」（设置 › 通用「动效」，squeezesIn）。
@@ -140,13 +140,17 @@ final class OverlayPanel: NSPanel {
   /// 材质底：返回窗口的 contentView 和放内容的那一层（面板和退场淡出的替身用同一份；程序坞预览的面板也用它，2026-10-22）
   static func makeBackground() -> (root: NSView, background: NSView) {
     if #available(macOS 26, *) {
-      // 液态玻璃：圆角交给玻璃（不用 maskImage、PanelRim 不画），内容进它的 contentView（玻璃用 Auto Layout 撑满）
-      // 图层按同一个圆角再裁一遍（macOS 27 当 key 时圆角外的黑边，见 NSGlassEffectView.clipped）
-      let glass = NSGlassEffectView.clipped(cornerRadius: Style.Radius.panel)
       let background = NSView()
-      background.autoresizingMask = [.width, .height]  // 自动缩放掩码和玻璃撑满它的约束一致、不打架
-      glass.contentView = background
-      return (glass, background)
+      background.wantsLayer = true
+      background.layer?.cornerRadius = Style.Radius.panel
+      background.layer?.cornerCurve = .continuous
+      background.layer?.masksToBounds = true
+      let material = NSHostingView(rootView: PanelGlass())
+      material.sizingOptions = []
+      material.frame = background.bounds
+      material.autoresizingMask = [.width, .height]
+      background.addSubview(material)
+      return (background, background)
     }
     // 系统毛玻璃底：state 必须 .active，本 App 从不激活，跟随窗口状态会一直是灰的非激活外观
     let effect = NSVisualEffectView()
@@ -884,6 +888,18 @@ final class PanelStandIn: NSPanel {
     ignoresMouseEvents = true
     animationBehavior = .none
     setAccessibilityElement(false)
+  }
+}
+
+@available(macOS 26, *)
+private struct PanelGlass: View {
+  var body: some View {
+    Style.panelScrim
+      .background {
+        Color.clear.glassEffect(.regular, in: Rectangle())
+      }
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
   }
 }
 

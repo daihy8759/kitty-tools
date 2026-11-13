@@ -50,6 +50,9 @@ nonisolated private final class LumaSink: NSObject, SCStreamOutput, SCStreamDele
 
 @MainActor @Suite(.serialized)
 struct PanelFadeTests {
+  nonisolated private static let glassDirectory =
+    ProcessInfo.processInfo.environment["KITTY_LIVE_GLASS_DIR"]
+
   /// 有主文字、次要文字（毛玻璃上「鲜亮」的那种）、分隔线、色块、选中底的一小块内容
   private struct Sample: View {
     var body: some View {
@@ -221,5 +224,69 @@ struct PanelFadeTests {
     #expect(closing.count >= 3, "没抓到淡出的帧")
     #expect((closing.max() ?? .infinity) <= before + 3, "淡出期间比关之前亮：泛白")
     #expect(abs((closing.last ?? 0) - 31) < 3)  // 底色 0.12 白的亮度
+  }
+
+  @Test(.enabled(if: glassDirectory != nil))
+  func glassSurfaceSnapshots() async throws {
+    try #require(CGPreflightScreenCaptureAccess(), "要「屏幕录制」授权")
+    let directory = URL(filePath: try #require(Self.glassDirectory))
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let saved = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+    defer { UserDefaults.standard.setVolatileDomain(saved, forName: UserDefaults.argumentDomain) }
+    let screen = try #require(NSScreen.main)
+    let area = NSRect(
+      x: screen.visibleFrame.maxX - 420, y: screen.visibleFrame.minY + 20, width: 400, height: 320)
+    let backdrop = NSWindow(
+      contentRect: area, styleMask: [.borderless], backing: .buffered, defer: false)
+    backdrop.isReleasedWhenClosed = false
+    backdrop.level = .floating
+    backdrop.ignoresMouseEvents = true
+    backdrop.hasShadow = false
+    backdrop.orderFrontRegardless()
+    defer { backdrop.orderOut(nil) }
+    for tint in [0, 1] {
+      var domain = saved
+      domain["NSGlassTintAmount"] = tint
+      UserDefaults.standard.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
+      for dark in [false, true] {
+        for bright in [false, true] {
+          backdrop.backgroundColor = NSColor(white: bright ? 0.96 : 0.12, alpha: 1)
+          let panel = OverlayPanel(
+            size: NSSize(width: 320, height: 240), autoHide: .clickOutside,
+            isPinned: { true }, content: Sample())
+          panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+          panel.setFrameOrigin(NSPoint(x: area.midX - 160, y: area.midY - 120))
+          panel.present(makingKey: false, keepsPlace: true)
+          defer { panel.hide() }
+          try await Task.sleep(for: .milliseconds(350))
+          #expect(panel.isVisible && !panel.isKeyWindow)
+          let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true)
+          let display = try #require(
+            content.displays.first { $0.displayID == screen.displayID })
+          let ids = Set(
+            [backdrop, panel].compactMap { ScreenCapture.windowID($0.windowNumber) })
+          let windows = content.windows.filter { ids.contains($0.windowID) }
+          try #require(windows.count == 2)
+          let configuration = SCStreamConfiguration()
+          configuration.sourceRect = CGRect(
+            x: area.minX - screen.frame.minX, y: screen.frame.maxY - area.maxY,
+            width: area.width, height: area.height)
+          configuration.width = Int(area.width * screen.backingScaleFactor)
+          configuration.height = Int(area.height * screen.backingScaleFactor)
+          configuration.showsCursor = false
+          configuration.colorSpaceName = CGColorSpace.sRGB
+          let image = try await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(display: display, including: windows),
+            configuration: configuration)
+          let name =
+            "panel-glass-\(tint == 0 ? "clear" : "tinted")-\(dark ? "dark" : "light")"
+            + "-\(bright ? "bright" : "dark")-backdrop.png"
+          try #require(
+            NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+          ).write(to: directory.appending(path: name))
+        }
+      }
+    }
   }
 }
