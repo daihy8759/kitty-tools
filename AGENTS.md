@@ -231,6 +231,7 @@ defaults delete com.yy.kitty-tools.native.dev folderAccessRequested
 ## 开发约定
 
 - 用中文回答用户；文档写中文，代码注释可以写中文。
+- **Git 推送**（用户 2026-11-13 指定）：本项目所有分支和 tag 的推送统一使用 `origin`，目标为 `https://github.com/daihy8759/kitty-tools`。默认推送远端固定为 `origin`；`upstream` 只用于读取上游代码，不作为推送目标。
 - 每个入口文件头部写注释说明用途。
 - 禁止新增任何第三方依赖（SPM 包、构建 / 格式化工具都算）。
 - 刻意的简化写 `ponytail:` 注释，写明上限和升级路径。
