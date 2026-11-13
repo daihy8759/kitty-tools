@@ -62,6 +62,7 @@ enum Prefs {
   /// 在这些 App 里停用快捷键（一条一个 App：「bundle id」或「bundle id|动作,动作」，HotKeyBlock；2026-11-10）：注册默认值 []，
   /// 跟着设置导出、备份、同步走（同剪贴板「不记录」的 App）
   static let hotKeyBlockedApps = "hotKeyBlockedApps"
+  static let launcherScanFolders = "launcherScanFolders"
   /// 剪贴板、启动器、翻译浮窗呼出时用挤压入场（设置 › 通用「动效」，默认关；2026-09-29 用户要求三块面板统一，设置从启动器页
   /// 挪到通用页；2026-10-03 转正，去掉「实验」）
   static let panelSqueezeEntrance = "panelSqueezeEntrance"

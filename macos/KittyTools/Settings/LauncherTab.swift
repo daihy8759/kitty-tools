@@ -29,6 +29,7 @@ struct LauncherTab: View {
   /// 文件搜索的文件夹授权：nil = 还没问过，否则是被拒绝的文件夹（出现、设置窗成为 key 时刷新；
   /// 不写成初始值：初始值每次重建视图都会求值，要去读受保护目录）
   @State private var deniedFolders: [String]?
+  @State private var scanFolderPaths: [String] = []
   /// 本机装了的浏览器和它的 App 位置（出现、设置窗变成 key 时重查；不写成初始值，同上）
   @State private var browsers: [(browser: Browsers.Browser, app: URL)] = []
   /// 设置窗变成 key 时加一：页面重画（书签条数重读）、浏览历史重读一次（去系统设置给了完全磁盘访问权限回来就能看到）
@@ -114,11 +115,31 @@ struct LauncherTab: View {
               Permissions.Kind.filesAndFolders.openSettings()
             }
           }
+          ForEach(scanFolderPaths, id: \.self) { path in
+            LabeledContent {
+              Button("移除") {
+                FileSearch.removeScanFolder(path)
+                scanFolderPaths = FileSearch.scanFolderPaths
+              }
+            } label: {
+              Text((path as NSString).lastPathComponent)
+              Text((path as NSString).abbreviatingWithTildeInPath)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            }
+          }
+          LabeledContent {
+            Button("添加文件夹…", action: addScanFolders)
+          } label: {
+            Text("扫描目录")
+            Text("把其他文件夹及其子文件夹加入文件搜索")
+          }
         } header: {
           Text("文件搜索")
         } footer: {
           SectionFootnote(
-            "「open 文件名」搜文件并打开，「find 文件名」在访达中显示；不想被搜到的文件夹加到 系统设置 › Spotlight › 搜索隐私。")
+            "「open 文件名」搜文件并打开，「find 文件名」在访达中显示。搜索结果来自 Spotlight 索引；不想被搜到的文件夹加到 系统设置 › Spotlight › 搜索隐私。"
+          )
         }
         Section {
           ForEach(browsers, id: \.browser.id) { browserRows($0.browser, app: $0.app) }
@@ -165,10 +186,30 @@ struct LauncherTab: View {
 
   private func recheck() {
     deniedFolders = Permissions.deniedFolders()
+    scanFolderPaths = FileSearch.scanFolderPaths
     browsers = Browsers.installed()
     checks += 1
     // 设置窗回到前台：脚本文件夹可能刚在访达里改过
     if UserDefaults.standard.bool(forKey: Prefs.launcherScripts) { scripts?.refresh() }
+  }
+
+  private func addScanFolders() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.allowsMultipleSelection = true
+    panel.prompt = "添加"
+    panel.message = "选择要纳入启动器文件搜索的文件夹"
+    let done: (NSApplication.ModalResponse) -> Void = { response in
+      guard response == .OK else { return }
+      FileSearch.addScanFolders(panel.urls)
+      scanFolderPaths = FileSearch.scanFolderPaths
+    }
+    if let window = NSApp.keyWindow {
+      panel.beginSheetModal(for: window, completionHandler: done)
+    } else {
+      FilePanel.begin(panel, completion: done)
+    }
   }
 
   /// 一家浏览器：图标 + 名字 + 书签开关，开着时下面写读到了几条，没读到（没有书签文件、文件里一条都没有、没授权）

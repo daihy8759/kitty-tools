@@ -54,6 +54,30 @@ final class FileSearch {
     "Carthage", "vendor", "venv", "__pycache__", "coverage",
   ]
 
+  static var scanFolderPaths: [String] {
+    let paths = UserDefaults.standard.stringArray(forKey: Prefs.launcherScanFolders) ?? []
+    var seen = Set<String>()
+    return paths.compactMap { path in
+      guard path.hasPrefix("/") else { return nil }
+      let normalized = URL(fileURLWithPath: path).standardizedFileURL.path(percentEncoded: false)
+      return seen.insert(normalized).inserted ? normalized : nil
+    }
+  }
+
+  static func addScanFolders(_ urls: [URL]) {
+    var paths = scanFolderPaths
+    for url in urls where url.isFileURL {
+      let path = url.standardizedFileURL.path(percentEncoded: false)
+      if !paths.contains(path) { paths.append(path) }
+    }
+    UserDefaults.standard.set(paths, forKey: Prefs.launcherScanFolders)
+  }
+
+  static func removeScanFolder(_ path: String) {
+    UserDefaults.standard.set(
+      scanFolderPaths.filter { $0 != path }, forKey: Prefs.launcherScanFolders)
+  }
+
   static let notSystem = #"kMDItemSupportFileType != "MDSystemFile""#
   static let recentQuery =
     #"((kMDItemLastUsedDate >= $time.today(-30)) || (kMDItemDateAdded >= $time.today(-14) && kMDItemWhereFroms == "*")) && "#
@@ -90,11 +114,17 @@ final class FileSearch {
     return (conditions + [notSystem]).joined(separator: " && ")
   }
 
-  /// 主目录外的、~/Library 里的（iCloud 云盘、第三方云盘除外）、路径上有 `excludedFolders` 的都不要
-  static func isExcluded(_ path: String, home: String = NSHomeDirectory()) -> Bool {
-    guard path.hasPrefix(home + "/") else { return true }
-    let components = path.dropFirst(home.count + 1).split(separator: "/")
-    if components.first == "Library",
+  static func isExcluded(
+    _ path: String, home: String = NSHomeDirectory(), additionalFolders: [String] = []
+  ) -> Bool {
+    let inHome = path.hasPrefix(home + "/")
+    let inAdditionalFolder = additionalFolders.contains { folder in
+      path == folder || path.hasPrefix(folder == "/" ? "/" : folder + "/")
+    }
+    guard inHome || inAdditionalFolder else { return true }
+    let components =
+      inHome ? path.dropFirst(home.count + 1).split(separator: "/") : path.split(separator: "/")
+    if inHome, !inAdditionalFolder, components.first == "Library",
       !(components.count > 1 && ["Mobile Documents", "CloudStorage"].contains(components[1]))
     {
       return true
@@ -235,6 +265,7 @@ final class FileSearch {
   private var query: NSMetadataQuery?
   private var observers: [NSObjectProtocol] = []
   private var onResults: ([Hit]) -> Void = { _ in }
+  private var scopedFolders: [String] = []
 
   /// 开始一次查询（先停掉上一次）。结果分批到：每批都回调一次（第一批通常就是全部），收完或够数就停
   func start(_ request: Request, onResults: @escaping ([Hit]) -> Void) {
@@ -243,7 +274,10 @@ final class FileSearch {
     guard let predicate = NSPredicate(fromMetadataQueryString: text) else { return onResults([]) }
     let query = NSMetadataQuery()
     query.predicate = predicate
-    query.searchScopes = [NSMetadataQueryUserHomeScope]
+    scopedFolders = Self.scanFolderPaths
+    var searchScopes: [Any] = [NSMetadataQueryUserHomeScope]
+    searchScopes.append(contentsOf: scopedFolders.map { URL(fileURLWithPath: $0) })
+    query.searchScopes = searchScopes
     query.sortDescriptors = [
       NSSortDescriptor(key: NSMetadataItemFSContentChangeDateKey, ascending: false)
     ]
@@ -269,6 +303,7 @@ final class FileSearch {
     observers = []
     query?.stop()
     query = nil
+    scopedFolders = []
   }
 
   private static let lastUsedDateKey = "kMDItemLastUsedDate"
@@ -281,7 +316,7 @@ final class FileSearch {
     for index in 0..<min(query.resultCount, Self.processLimit) {
       guard let item = query.result(at: index) as? NSMetadataItem,
         let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
-        !Self.isExcluded(path)
+        !Self.isExcluded(path, additionalFolders: scopedFolders)
       else { continue }
       let value = { query.value(ofAttribute: $0, forResultAt: index) }
       let dates = [NSMetadataItemFSContentChangeDateKey, Self.lastUsedDateKey, Self.dateAddedKey]
